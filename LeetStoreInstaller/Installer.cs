@@ -12,30 +12,51 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Shell;
 using System.IO.Compression;
+using System.Net.Http;
+using System.Text.Json;
 
 namespace LeetStoreInstaller
 {
     public partial class InstallerWindow : Window
     {
         private readonly string _installPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LeetStore");
-        private readonly string _appName = "leet.exe";
-        private readonly string _githubReleaseUrl = "https://github.com/enoughdrama/LeetStore/releases/latest/download/LeetStoreApp.zip";
-        private readonly string _fallbackReleaseUrl = "https://raw.githubusercontent.com/enoughdrama/LeetStore/main/dist/LeetStoreApp.zip";
+        private readonly string _appName = "LeetStoreApp.exe";
+        private readonly string _backendUrl = "http://localhost:3000"; // Replace with your actual backend URL
+        private readonly string _downloadUrl;
         private bool _installComplete = false;
+        private HttpClient _httpClient;
+
+        public class VersionInfo
+        {
+            public string Current { get; set; }
+            public VersionEntry[] Versions { get; set; }
+        }
+
+        public class VersionEntry
+        {
+            public string Version { get; set; }
+            public string ReleaseDate { get; set; }
+            public string Notes { get; set; }
+        }
 
         public InstallerWindow()
         {
             InitializeComponent();
-
+            
+            _httpClient = new HttpClient();
+            _httpClient.Timeout = TimeSpan.FromSeconds(30);
+            _downloadUrl = $"{_backendUrl}/api/latest";
+            
             SetupWindow();
             CheckAdminRights();
+            LoadVersionInfoAsync();
         }
 
         private void SetupWindow()
         {
             var converter = new BrushConverter();
             Background = (Brush)converter.ConvertFromString("#F5F5F7");
-
+            
             WindowChrome.SetWindowChrome(this, new WindowChrome
             {
                 CaptionHeight = 0,
@@ -43,7 +64,7 @@ namespace LeetStoreInstaller
                 CornerRadius = new CornerRadius(8),
                 GlassFrameThickness = new Thickness(0)
             });
-
+            
             var dropShadowEffect = new DropShadowEffect
             {
                 Color = Colors.Black,
@@ -52,9 +73,9 @@ namespace LeetStoreInstaller
                 Opacity = 0.2,
                 BlurRadius = 10
             };
-
+            
             MainPanel.Effect = dropShadowEffect;
-
+            
             var animation = new DoubleAnimation
             {
                 From = 0,
@@ -62,13 +83,13 @@ namespace LeetStoreInstaller
                 Duration = TimeSpan.FromSeconds(0.5),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
-
+            
             this.BeginAnimation(UIElement.OpacityProperty, animation);
-
+            
             var transformGroup = new TransformGroup();
             transformGroup.Children.Add(new ScaleTransform());
             MainPanel.RenderTransform = transformGroup;
-
+            
             var scaleAnimation = new DoubleAnimation
             {
                 From = 0.95,
@@ -76,7 +97,7 @@ namespace LeetStoreInstaller
                 Duration = TimeSpan.FromSeconds(0.5),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
-
+            
             ((TransformGroup)MainPanel.RenderTransform).Children[0].BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnimation);
             ((TransformGroup)MainPanel.RenderTransform).Children[0].BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnimation);
 
@@ -94,7 +115,33 @@ namespace LeetStoreInstaller
                 InstallButton.IsEnabled = false;
             }
         }
-
+        
+        private async void LoadVersionInfoAsync()
+        {
+            try
+            {
+                var response = await _httpClient.GetStringAsync($"{_backendUrl}/api/version");
+                var versionInfo = JsonSerializer.Deserialize<VersionInfo>(response);
+                
+                if (versionInfo != null && !string.IsNullOrEmpty(versionInfo.Current))
+                {
+                    StatusText.Text = $"Ready to install version {versionInfo.Current}";
+                    
+                    // Find the current version entry for notes
+                    var currentVersionEntry = Array.Find(versionInfo.Versions, v => v.Version == versionInfo.Current);
+                    if (currentVersionEntry != null && !string.IsNullOrEmpty(currentVersionEntry.Notes))
+                    {
+                        // Could display release notes here if UI had a place for it
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = "Unable to connect to server";
+                Debug.WriteLine($"Error loading version info: {ex.Message}");
+            }
+        }
+        
         private async void InstallButton_Click(object sender, RoutedEventArgs e)
         {
             if (_installComplete)
@@ -103,106 +150,137 @@ namespace LeetStoreInstaller
                 {
                     Process.Start(Path.Combine(_installPath, _appName));
                 }
-
+                
                 Application.Current.Shutdown();
                 return;
             }
-
+            
             InstallButton.IsEnabled = false;
             InstallProgressBar.Visibility = Visibility.Visible;
             InstallProgressBar.Value = 0;
             StatusText.Text = "Preparing installation...";
-
+            
             try
             {
-                await Task.Run(() =>
+                await Task.Run(async () => 
                 {
                     InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 10);
                     StatusText.Dispatcher.Invoke(() => StatusText.Text = "Creating installation directory...");
-
+                    
                     if (!Directory.Exists(_installPath))
                     {
                         Directory.CreateDirectory(_installPath);
                     }
-
+                    
                     InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 20);
                     StatusText.Dispatcher.Invoke(() => StatusText.Text = "Downloading application files...");
-
+                    
                     string tempZipFile = Path.Combine(Path.GetTempPath(), "LeetStoreApp.zip");
-
+                    
                     int maxRetries = 3;
                     int retryCount = 0;
                     bool downloadSuccess = false;
-                    bool useFallbackUrl = false;
-
+                    
                     while (!downloadSuccess && retryCount < maxRetries)
                     {
                         try
                         {
-                            using (WebClient client = new WebClient())
+                            using (var httpClient = new HttpClient())
                             {
-                                client.Headers.Add("User-Agent", "LeetStore-Installer");
-
-                                string url = useFallbackUrl ? _fallbackReleaseUrl : _githubReleaseUrl;
-                                StatusText.Dispatcher.Invoke(() =>
-                                    StatusText.Text = $"Downloading from {(useFallbackUrl ? "fallback" : "primary")} source...");
-
-                                client.DownloadFile(url, tempZipFile);
+                                httpClient.Timeout = TimeSpan.FromMinutes(5); // Longer timeout for download
+                                
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = "Downloading application package...");
+                                
+                                // Stream the download to a file
+                                using (var response = await httpClient.GetAsync(_downloadUrl, HttpCompletionOption.ResponseHeadersRead))
+                                {
+                                    response.EnsureSuccessStatusCode();
+                                    
+                                    long? totalBytes = response.Content.Headers.ContentLength;
+                                    using (var contentStream = await response.Content.ReadAsStreamAsync())
+                                    using (var fileStream = new FileStream(tempZipFile, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+                                    {
+                                        byte[] buffer = new byte[8192];
+                                        long totalBytesRead = 0;
+                                        int bytesRead;
+                                        
+                                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) != 0)
+                                        {
+                                            await fileStream.WriteAsync(buffer, 0, bytesRead);
+                                            totalBytesRead += bytesRead;
+                                            
+                                            if (totalBytes.HasValue)
+                                            {
+                                                double progressPercentage = (double)totalBytesRead / totalBytes.Value * 40 + 20;
+                                                InstallProgressBar.Dispatcher.Invoke(() => 
+                                                    InstallProgressBar.Value = progressPercentage);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             downloadSuccess = true;
                         }
-                        catch (WebException ex)
+                        catch (Exception ex)
                         {
                             retryCount++;
-
-                            if (!useFallbackUrl)
-                            {
-                                useFallbackUrl = true;
-                                StatusText.Dispatcher.Invoke(() =>
-                                    StatusText.Text = "Primary download failed. Trying fallback source...");
-                                continue;
-                            }
-
+                            
                             if (retryCount >= maxRetries)
                             {
-                                StatusText.Dispatcher.Invoke(() =>
+                                StatusText.Dispatcher.Invoke(() => 
                                     StatusText.Text = "All download attempts failed.");
                                 throw;
                             }
-
-                            var response = ex.Response as HttpWebResponse;
-                            if (response != null && response.StatusCode == HttpStatusCode.Forbidden)
+                            
+                            // Wait before retry
+                            int waitTime = (int)Math.Pow(2, retryCount);
+                            StatusText.Dispatcher.Invoke(() => 
+                                StatusText.Text = $"Download error. Retrying in {waitTime} seconds...");
+                            await Task.Delay(waitTime * 1000);
+                        }
+                    }
+                    
+                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 60);
+                    StatusText.Dispatcher.Invoke(() => StatusText.Text = "Extracting files...");
+                    
+                    // Ensure the installation directory is empty or backup existing files
+                    if (Directory.Exists(_installPath) && Directory.GetFileSystemEntries(_installPath).Length > 0)
+                    {
+                        string backupDir = Path.Combine(Path.GetTempPath(), "LeetStoreBackup_" + DateTime.Now.Ticks);
+                        Directory.CreateDirectory(backupDir);
+                        
+                        foreach (string item in Directory.GetFileSystemEntries(_installPath))
+                        {
+                            string destPath = Path.Combine(backupDir, Path.GetFileName(item));
+                            
+                            if (Directory.Exists(item))
                             {
-                                int waitTime = (int)Math.Pow(2, retryCount);
-                                StatusText.Dispatcher.Invoke(() =>
-                                    StatusText.Text = $"Rate limit detected. Retrying in {waitTime} seconds...");
-                                System.Threading.Thread.Sleep(waitTime * 1000);
+                                DirectoryCopy(item, destPath, true);
                             }
                             else
                             {
-                                StatusText.Dispatcher.Invoke(() =>
-                                    StatusText.Text = $"Download error. Retrying ({retryCount}/{maxRetries})...");
-                                System.Threading.Thread.Sleep(1000);
+                                File.Copy(item, destPath, true);
                             }
                         }
+                        
+                        Directory.Delete(_installPath, true);
+                        Directory.CreateDirectory(_installPath);
                     }
-
-                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 60);
-                    StatusText.Dispatcher.Invoke(() => StatusText.Text = "Extracting files...");
-
+                    
                     ZipFile.ExtractToDirectory(tempZipFile, _installPath, true);
-
+                    
                     InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 80);
                     StatusText.Dispatcher.Invoke(() => StatusText.Text = "Creating shortcuts...");
-
+                    
                     CreateDesktopShortcut();
                     CreateStartMenuShortcut();
-
+                    
                     File.Delete(tempZipFile);
-
+                    
                     InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 100);
                 });
-
+                
                 StatusText.Text = "Installation completed successfully!";
                 InstallButton.Content = "Launch Application";
                 _installComplete = true;
@@ -215,36 +293,63 @@ namespace LeetStoreInstaller
                 InstallButton.IsEnabled = true;
             }
         }
+        
+        private void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
+        {
+            DirectoryInfo dir = new DirectoryInfo(sourceDirName);
+            DirectoryInfo[] dirs = dir.GetDirectories();
 
+            if (!Directory.Exists(destDirName))
+            {
+                Directory.CreateDirectory(destDirName);
+            }
+
+            FileInfo[] files = dir.GetFiles();
+            foreach (FileInfo file in files)
+            {
+                string tempPath = Path.Combine(destDirName, file.Name);
+                file.CopyTo(tempPath, true);
+            }
+
+            if (copySubDirs)
+            {
+                foreach (DirectoryInfo subdir in dirs)
+                {
+                    string tempPath = Path.Combine(destDirName, subdir.Name);
+                    DirectoryCopy(subdir.FullName, tempPath, copySubDirs);
+                }
+            }
+        }
+        
         private void CreateDesktopShortcut()
         {
             string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             string shortcutPath = Path.Combine(desktopPath, "LeetStore.lnk");
-
+            
             IWshRuntimeLibrary.WshShell shell = new IWshRuntimeLibrary.WshShell();
             IWshRuntimeLibrary.IWshShortcut shortcut = (IWshRuntimeLibrary.IWshShortcut)shell.CreateShortcut(shortcutPath);
-
+            
             shortcut.TargetPath = Path.Combine(_installPath, _appName);
             shortcut.WorkingDirectory = _installPath;
             shortcut.Description = "LeetStore Application";
             shortcut.IconLocation = Path.Combine(_installPath, _appName);
             shortcut.Save();
         }
-
+        
         private void CreateStartMenuShortcut()
         {
             string startMenuPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "LeetStore");
-
+            
             if (!Directory.Exists(startMenuPath))
             {
                 Directory.CreateDirectory(startMenuPath);
             }
-
+            
             string shortcutPath = Path.Combine(startMenuPath, "LeetStore.lnk");
-
+            
             IWshRuntimeLibrary.WshShell shell = new IWshRuntimeLibrary.WshShell();
             IWshRuntimeLibrary.IWshShortcut shortcut = (IWshRuntimeLibrary.IWshShortcut)shell.CreateShortcut(shortcutPath);
-
+            
             shortcut.TargetPath = Path.Combine(_installPath, _appName);
             shortcut.WorkingDirectory = _installPath;
             shortcut.Description = "LeetStore Application";
@@ -256,12 +361,12 @@ namespace LeetStoreInstaller
         {
             Application.Current.Shutdown();
         }
-
+        
         private void MinimizeButton_Click(object sender, RoutedEventArgs e)
         {
             this.WindowState = WindowState.Minimized;
         }
-
+        
         private void Window_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             if (e.ChangedButton == System.Windows.Input.MouseButton.Left)
