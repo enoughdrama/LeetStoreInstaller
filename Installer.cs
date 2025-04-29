@@ -129,9 +129,46 @@ namespace LeetStoreInstaller
                     
                     string tempZipFile = Path.Combine(Path.GetTempPath(), "LeetStoreApp.zip");
                     
-                    using (WebClient client = new WebClient())
+                    int maxRetries = 3;
+                    int retryCount = 0;
+                    bool downloadSuccess = false;
+                    
+                    while (!downloadSuccess && retryCount < maxRetries)
                     {
-                        client.DownloadFile(_githubReleaseUrl, tempZipFile);
+                        try
+                        {
+                            using (WebClient client = new WebClient())
+                            {
+                                // Add user agent to avoid rate limits
+                                client.Headers.Add("User-Agent", "LeetStore-Installer");
+                                client.DownloadFile(_githubReleaseUrl, tempZipFile);
+                            }
+                            downloadSuccess = true;
+                        }
+                        catch (WebException ex)
+                        {
+                            retryCount++;
+                            
+                            if (retryCount >= maxRetries)
+                                throw;
+                                
+                            // Check if it's a rate limit issue
+                            var response = ex.Response as HttpWebResponse;
+                            if (response != null && response.StatusCode == HttpStatusCode.Forbidden)
+                            {
+                                // Exponential backoff for rate limits
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = $"Rate limit detected. Retrying in {Math.Pow(2, retryCount)} seconds...");
+                                System.Threading.Thread.Sleep((int)Math.Pow(2, retryCount) * 1000);
+                            }
+                            else
+                            {
+                                // Other error, shorter retry
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = $"Download error. Retrying ({retryCount}/{maxRetries})...");
+                                System.Threading.Thread.Sleep(1000);
+                            }
+                        }
                     }
                     
                     InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 60);
