@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="LeetStoreApp.csproj" />
+    <None Include="LeetStoreInstaller.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Interop.IWshRuntimeLibrary" Version="1.0.1" />
+    <PackageReference Include="Octokit" Version="14.0.0" />
+  </ItemGroup>
+
+</Project>
