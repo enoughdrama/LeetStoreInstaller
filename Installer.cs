@@ -20,6 +20,7 @@ namespace LeetStoreInstaller
         private readonly string _installPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LeetStore");
         private readonly string _appName = "LeetStoreApp.exe";
         private readonly string _githubReleaseUrl = "https://github.com/enoughdrama/LeetStore/releases/latest/download/LeetStoreApp.zip";
+        private readonly string _fallbackReleaseUrl = "https://raw.githubusercontent.com/enoughdrama/LeetStore/main/dist/LeetStoreApp.zip";
         private bool _installComplete = false;
 
         public InstallerWindow()
@@ -132,6 +133,7 @@ namespace LeetStoreInstaller
                     int maxRetries = 3;
                     int retryCount = 0;
                     bool downloadSuccess = false;
+                    bool useFallbackUrl = false;
                     
                     while (!downloadSuccess && retryCount < maxRetries)
                     {
@@ -141,7 +143,12 @@ namespace LeetStoreInstaller
                             {
                                 // Add user agent to avoid rate limits
                                 client.Headers.Add("User-Agent", "LeetStore-Installer");
-                                client.DownloadFile(_githubReleaseUrl, tempZipFile);
+                                
+                                string url = useFallbackUrl ? _fallbackReleaseUrl : _githubReleaseUrl;
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = $"Downloading from {(useFallbackUrl ? "fallback" : "primary")} source...");
+                                    
+                                client.DownloadFile(url, tempZipFile);
                             }
                             downloadSuccess = true;
                         }
@@ -149,17 +156,31 @@ namespace LeetStoreInstaller
                         {
                             retryCount++;
                             
+                            // Try fallback URL after first failure of primary URL
+                            if (!useFallbackUrl)
+                            {
+                                useFallbackUrl = true;
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = "Primary download failed. Trying fallback source...");
+                                continue;
+                            }
+                            
                             if (retryCount >= maxRetries)
+                            {
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = "All download attempts failed.");
                                 throw;
+                            }
                                 
                             // Check if it's a rate limit issue
                             var response = ex.Response as HttpWebResponse;
                             if (response != null && response.StatusCode == HttpStatusCode.Forbidden)
                             {
                                 // Exponential backoff for rate limits
+                                int waitTime = (int)Math.Pow(2, retryCount);
                                 StatusText.Dispatcher.Invoke(() => 
-                                    StatusText.Text = $"Rate limit detected. Retrying in {Math.Pow(2, retryCount)} seconds...");
-                                System.Threading.Thread.Sleep((int)Math.Pow(2, retryCount) * 1000);
+                                    StatusText.Text = $"Rate limit detected. Retrying in {waitTime} seconds...");
+                                System.Threading.Thread.Sleep(waitTime * 1000);
                             }
                             else
                             {
