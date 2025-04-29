@@ -31,6 +31,9 @@ namespace LeetStoreApp
         private readonly GitHubClient _githubClient;
         private bool _isUpdating = false;
         private List<string> _filesToUpdate = new List<string>();
+        private DateTime _lastUpdateCheck = DateTime.MinValue;
+        private TimeSpan _updateCheckInterval = TimeSpan.FromHours(1);
+        private string _cacheFilePath;
 
         public MainWindow()
         {
@@ -38,6 +41,7 @@ namespace LeetStoreApp
             
             _installDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             _githubClient = new GitHubClient(new ProductHeaderValue("LeetStore-Updater"));
+            _cacheFilePath = Path.Combine(_installDir, "update_cache.json");
             
             SetupWindow();
             CheckForUpdatesAsync();
@@ -96,64 +100,186 @@ namespace LeetStoreApp
             ((TransformGroup)MainPanel.RenderTransform).Children[0].BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnimation);
         }
         
+        private class CacheData
+        {
+            public List<FileInfo> Files { get; set; } = new List<FileInfo>();
+            public DateTime LastUpdated { get; set; }
+        }
+
+        private class FileInfo
+        {
+            public string Name { get; set; }
+            public string Sha { get; set; }
+            public string DownloadUrl { get; set; }
+        }
+
         private async Task CheckForUpdatesAsync()
         {
             try
             {
                 UpdateStatusText.Text = "Checking for updates...";
                 
-                var contents = await _githubClient.Repository.Content.GetAllContents(_githubUser, _githubRepo);
+                // Check if we should use cached data to avoid rate limits
+                var now = DateTime.Now;
+                bool useCache = File.Exists(_cacheFilePath) && 
+                               (now - _lastUpdateCheck) < _updateCheckInterval;
                 
-                if (contents != null && contents.Count > 0)
+                List<FileInfo> filesInfo;
+                
+                if (useCache)
                 {
-                    foreach (var content in contents)
-                    {
-                        if (content.Type == ContentType.File)
-                        {
-                            var localFilePath = Path.Combine(_installDir, content.Name);
-                            var needsUpdate = false;
-                            
-                            if (!File.Exists(localFilePath))
-                            {
-                                needsUpdate = true;
-                            }
-                            else
-                            {
-                                var localHash = CalculateFileHash(localFilePath);
-                                var remoteHash = content.Sha;
-                                
-                                if (localHash != remoteHash)
-                                {
-                                    needsUpdate = true;
-                                }
-                            }
-                            
-                            if (needsUpdate)
-                            {
-                                _filesToUpdate.Add(content.Name);
-                            }
-                        }
-                    }
-                    
-                    if (_filesToUpdate.Count > 0)
-                    {
-                        UpdateStatusText.Text = $"Updates available: {_filesToUpdate.Count} files need updating";
-                        UpdateButton.Visibility = Visibility.Visible;
-                    }
-                    else
-                    {
-                        UpdateStatusText.Text = "Your application is up to date";
-                        UpdateButton.Visibility = Visibility.Hidden;
-                    }
+                    // Use cached data
+                    UpdateStatusText.Text = "Using cached repository data...";
+                    filesInfo = LoadCachedData();
                 }
                 else
                 {
-                    UpdateStatusText.Text = "No files found in repository";
+                    try
+                    {
+                        UpdateStatusText.Text = "Fetching repository data...";
+                        
+                        // Get rate limit info first
+                        var rateLimit = await _githubClient.Miscellaneous.GetRateLimits();
+                        int remainingRequests = rateLimit.Resources.Core.Remaining;
+                        
+                        if (remainingRequests < 5)
+                        {
+                            var resetTime = rateLimit.Resources.Core.Reset.ToLocalTime();
+                            UpdateStatusText.Text = $"GitHub API rate limit reached. Retry after {resetTime.ToShortTimeString()}";
+                            
+                            // If we have a cache, use it despite the interval
+                            if (File.Exists(_cacheFilePath))
+                            {
+                                UpdateStatusText.Text = "Using cached data due to rate limits...";
+                                filesInfo = LoadCachedData();
+                            }
+                            else
+                            {
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // Fetch fresh data
+                            var contents = await _githubClient.Repository.Content.GetAllContents(_githubUser, _githubRepo);
+                            
+                            filesInfo = contents
+                                .Where(c => c.Type == ContentType.File)
+                                .Select(c => new FileInfo 
+                                { 
+                                    Name = c.Name, 
+                                    Sha = c.Sha,
+                                    DownloadUrl = c.DownloadUrl
+                                })
+                                .ToList();
+                                
+                            // Update cache
+                            SaveCacheData(filesInfo);
+                            _lastUpdateCheck = now;
+                        }
+                    }
+                    catch (RateLimitExceededException ex)
+                    {
+                        if (File.Exists(_cacheFilePath))
+                        {
+                            UpdateStatusText.Text = "Using cached data due to rate limits...";
+                            filesInfo = LoadCachedData();
+                        }
+                        else
+                        {
+                            UpdateStatusText.Text = $"GitHub API rate limit exceeded. Please try again later.";
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (File.Exists(_cacheFilePath))
+                        {
+                            UpdateStatusText.Text = "Error accessing GitHub. Using cached data...";
+                            filesInfo = LoadCachedData();
+                        }
+                        else
+                        {
+                            throw;
+                        }
+                    }
+                }
+                
+                // Process files data to find updates needed
+                _filesToUpdate.Clear();
+                
+                foreach (var fileInfo in filesInfo)
+                {
+                    var localFilePath = Path.Combine(_installDir, fileInfo.Name);
+                    var needsUpdate = false;
+                    
+                    if (!File.Exists(localFilePath))
+                    {
+                        needsUpdate = true;
+                    }
+                    else
+                    {
+                        var localHash = CalculateFileHash(localFilePath);
+                        var remoteHash = fileInfo.Sha;
+                        
+                        if (localHash != remoteHash)
+                        {
+                            needsUpdate = true;
+                        }
+                    }
+                    
+                    if (needsUpdate)
+                    {
+                        _filesToUpdate.Add(fileInfo.Name);
+                    }
+                }
+                
+                if (_filesToUpdate.Count > 0)
+                {
+                    UpdateStatusText.Text = $"Updates available: {_filesToUpdate.Count} files need updating";
+                    UpdateButton.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    UpdateStatusText.Text = "Your application is up to date";
+                    UpdateButton.Visibility = Visibility.Hidden;
                 }
             }
             catch (Exception ex)
             {
                 UpdateStatusText.Text = $"Error checking for updates: {ex.Message}";
+            }
+        }
+        
+        private List<FileInfo> LoadCachedData()
+        {
+            try
+            {
+                string json = File.ReadAllText(_cacheFilePath);
+                var cacheData = JsonSerializer.Deserialize<CacheData>(json);
+                return cacheData?.Files ?? new List<FileInfo>();
+            }
+            catch
+            {
+                return new List<FileInfo>();
+            }
+        }
+        
+        private void SaveCacheData(List<FileInfo> filesInfo)
+        {
+            try
+            {
+                var cacheData = new CacheData
+                {
+                    Files = filesInfo,
+                    LastUpdated = DateTime.Now
+                };
+                
+                string json = JsonSerializer.Serialize(cacheData, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(_cacheFilePath, json);
+            }
+            catch
+            {
             }
         }
         
@@ -181,18 +307,91 @@ namespace LeetStoreApp
             {
                 int totalFiles = _filesToUpdate.Count;
                 int processedFiles = 0;
+                int retryCount = 0;
+                bool useDirectDownload = false;
                 
-                foreach (var fileName in _filesToUpdate)
+                // Prepare a backup HttpClient for direct downloads as fallback
+                using (HttpClient httpClient = new HttpClient())
                 {
-                    UpdateStatusText.Text = $"Updating {fileName}...";
+                    // Set appropriate headers to mimic a browser
+                    httpClient.DefaultRequestHeaders.Add("User-Agent", "LeetStore-Updater");
                     
-                    var fileContent = await _githubClient.Repository.Content.GetRawContent(_githubUser, _githubRepo, fileName);
-                    var localFilePath = Path.Combine(_installDir, fileName);
-                    
-                    File.WriteAllBytes(localFilePath, fileContent);
-                    
-                    processedFiles++;
-                    UpdateProgressBar.Value = (double)processedFiles / totalFiles * 100;
+                    foreach (var fileName in _filesToUpdate)
+                    {
+                        UpdateStatusText.Text = $"Updating {fileName}...";
+                        
+                        bool fileUpdated = false;
+                        retryCount = 0;
+                        
+                        while (!fileUpdated && retryCount < 3)
+                        {
+                            try
+                            {
+                                byte[] fileContent;
+                                
+                                if (useDirectDownload)
+                                {
+                                    // Use direct URL download as fallback for rate limits
+                                    string rawUrl = $"https://raw.githubusercontent.com/{_githubUser}/{_githubRepo}/main/{fileName}";
+                                    fileContent = await httpClient.GetByteArrayAsync(rawUrl);
+                                }
+                                else
+                                {
+                                    // Try GitHub API first
+                                    fileContent = await _githubClient.Repository.Content.GetRawContent(_githubUser, _githubRepo, fileName);
+                                }
+                                
+                                var localFilePath = Path.Combine(_installDir, fileName);
+                                
+                                // Create directory if it doesn't exist
+                                var directory = Path.GetDirectoryName(localFilePath);
+                                if (!Directory.Exists(directory))
+                                {
+                                    Directory.CreateDirectory(directory);
+                                }
+                                
+                                // Backup the existing file if it exists
+                                if (File.Exists(localFilePath))
+                                {
+                                    string backupPath = localFilePath + ".bak";
+                                    if (File.Exists(backupPath))
+                                        File.Delete(backupPath);
+                                    File.Copy(localFilePath, backupPath);
+                                }
+                                
+                                // Write the new file
+                                File.WriteAllBytes(localFilePath, fileContent);
+                                fileUpdated = true;
+                            }
+                            catch (RateLimitExceededException)
+                            {
+                                useDirectDownload = true;
+                                retryCount++;
+                                
+                                if (retryCount >= 3)
+                                {
+                                    throw new Exception("GitHub API rate limit exceeded. Please try again later.");
+                                }
+                                
+                                await Task.Delay(1000); // Wait before retry
+                            }
+                            catch (Exception ex)
+                            {
+                                retryCount++;
+                                
+                                if (retryCount >= 3)
+                                {
+                                    throw new Exception($"Failed to update {fileName} after multiple attempts: {ex.Message}");
+                                }
+                                
+                                // Exponential backoff
+                                await Task.Delay(1000 * retryCount); 
+                            }
+                        }
+                        
+                        processedFiles++;
+                        UpdateProgressBar.Value = (double)processedFiles / totalFiles * 100;
+                    }
                 }
                 
                 UpdateStatusText.Text = "Update completed successfully";
@@ -209,6 +408,14 @@ namespace LeetStoreApp
                 
                 _filesToUpdate.Clear();
                 UpdateButton.Visibility = Visibility.Hidden;
+                
+                // Force refresh the cache after a successful update
+                try
+                {
+                    if (File.Exists(_cacheFilePath))
+                        File.Delete(_cacheFilePath);
+                }
+                catch { }
                 
                 await Task.Delay(2000);
                 
