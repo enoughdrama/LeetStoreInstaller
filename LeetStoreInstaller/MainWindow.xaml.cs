@@ -146,15 +146,14 @@ namespace LeetStoreApp
                 bool useCache = File.Exists(_cacheFilePath) && 
                                (now - _lastUpdateCheck) < _updateCheckInterval;
                 
-                List<FileInfo> filesInfo;
+                CacheData cacheData;
                 string serverVersion;
                 
                 if (useCache)
                 {
                     // Use cached data
                     UpdateStatusText.Text = "Using cached data...";
-                    var cacheData = LoadCachedData();
-                    filesInfo = cacheData.Files;
+                    cacheData = LoadCachedData();
                     serverVersion = cacheData.Version;
                 }
                 else
@@ -174,12 +173,17 @@ namespace LeetStoreApp
                             var responseContent = await response.Content.ReadAsStringAsync();
                             var filesResponse = JsonSerializer.Deserialize<FilesResponse>(responseContent);
                             
-                            filesInfo = filesResponse.Files;
-                            serverVersion = filesResponse.Version;
+                            cacheData = new CacheData
+                            {
+                                Files = filesResponse.Files,
+                                Version = filesResponse.Version,
+                                LastUpdated = now
+                            };
                             
                             // Update cache
-                            SaveCacheData(filesInfo, serverVersion);
+                            SaveCacheData(cacheData);
                             _lastUpdateCheck = now;
+                            serverVersion = filesResponse.Version;
                         }
                     }
                     catch (Exception ex)
@@ -187,8 +191,7 @@ namespace LeetStoreApp
                         if (File.Exists(_cacheFilePath))
                         {
                             UpdateStatusText.Text = "Error connecting to server. Using cached data...";
-                            var cacheData = LoadCachedData();
-                            filesInfo = cacheData.Files;
+                            cacheData = LoadCachedData();
                             serverVersion = cacheData.Version;
                         }
                         else
@@ -210,7 +213,7 @@ namespace LeetStoreApp
                 // Process files data to find updates needed
                 _filesToUpdate.Clear();
                 
-                foreach (var fileInfo in filesInfo)
+                foreach (var fileInfo in cacheData.Files)
                 {
                     var localFilePath = Path.Combine(_installDir, fileInfo.Name);
                     var needsUpdate = false;
@@ -263,31 +266,24 @@ namespace LeetStoreApp
             }
         }
         
-        private List<FileInfo> LoadCachedData()
+        private CacheData LoadCachedData()
         {
             try
             {
                 string json = File.ReadAllText(_cacheFilePath);
                 var cacheData = JsonSerializer.Deserialize<CacheData>(json);
-                return cacheData?.Files ?? new List<FileInfo>();
+                return cacheData ?? new CacheData { Files = new List<FileInfo>(), Version = _appVersion };
             }
             catch
             {
-                return new List<FileInfo>();
+                return new CacheData { Files = new List<FileInfo>(), Version = _appVersion };
             }
         }
         
-        private void SaveCacheData(List<FileInfo> filesInfo, string version)
+        private void SaveCacheData(CacheData cacheData)
         {
             try
             {
-                var cacheData = new CacheData
-                {
-                    Files = filesInfo,
-                    Version = version,
-                    LastUpdated = DateTime.Now
-                };
-                
                 string json = JsonSerializer.Serialize(cacheData, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(_cacheFilePath, json);
             }
