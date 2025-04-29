@@ -1,42 +1,36 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
+using System.Net;
 using System.Net.Http;
-using System.Reflection;
+using System.Security.Principal;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
 using System.Windows.Shell;
-using System.Text.Json;
-using System.Net;
 using System.IO.Compression;
 
-namespace LeetStoreApp
+namespace LeetStoreInstaller
 {
     public partial class MainWindow : Window
     {
-        private readonly string _appVersion = "1.0.0";
-        private readonly string _backendUrl = "http://localhost:3000"; // Replace with your actual backend URL
-        private readonly string _installDir;
-        private bool _isUpdating = false;
-        private List<FileInfo> _filesToUpdate = new List<FileInfo>();
-        private DateTime _lastUpdateCheck = DateTime.MinValue;
-        private TimeSpan _updateCheckInterval = TimeSpan.FromHours(1);
-        private string _cacheFilePath;
+        private readonly string _installPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LeetStore");
+        private readonly string _appName = "LeetStoreApp.exe";
+        private readonly string _backendUrl = "https://s.enoughdrama.me";
+        private readonly string _downloadUrl;
+        private bool _installComplete = false;
         private HttpClient _httpClient;
 
         public class VersionInfo
         {
             public string Current { get; set; }
-            public List<VersionEntry> Versions { get; set; }
+            public VersionEntry[] Versions { get; set; }
         }
 
         public class VersionEntry
@@ -71,15 +65,13 @@ namespace LeetStoreApp
         {
             InitializeComponent();
             
-            _installDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            _cacheFilePath = Path.Combine(_installDir, "update_cache.json");
             _httpClient = new HttpClient();
-            
-            // Set timeout to avoid hanging
             _httpClient.Timeout = TimeSpan.FromSeconds(30);
+            _downloadUrl = $"{_backendUrl}/api/latest";
             
             SetupWindow();
-            CheckForUpdatesAsync();
+            CheckAdminRights();
+            LoadVersionInfoAsync();
         }
 
         private void SetupWindow()
@@ -94,9 +86,6 @@ namespace LeetStoreApp
                 CornerRadius = new CornerRadius(8),
                 GlassFrameThickness = new Thickness(0)
             });
-            
-            VersionLabel.Content = $"Version {_appVersion}";
-            UpdateProgressBar.Visibility = Visibility.Hidden;
             
             var dropShadowEffect = new DropShadowEffect
             {
@@ -133,269 +122,261 @@ namespace LeetStoreApp
             
             ((TransformGroup)MainPanel.RenderTransform).Children[0].BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnimation);
             ((TransformGroup)MainPanel.RenderTransform).Children[0].BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnimation);
+
+            InstallButton.Content = "Install";
+            InstallProgressBar.Visibility = Visibility.Hidden;
+        }
+
+        private void CheckAdminRights()
+        {
+            bool isAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+            if (!isAdmin)
+            {
+                MessageBox.Show("This installer requires administrator privileges. Please run as administrator.", "Administrator Rights Required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                StatusText.Text = "Please restart installer as administrator";
+                InstallButton.IsEnabled = false;
+            }
         }
         
-        private async Task CheckForUpdatesAsync()
+        private async void LoadVersionInfoAsync()
         {
             try
             {
-                UpdateStatusText.Text = "Checking for updates...";
+                var response = await _httpClient.GetStringAsync($"{_backendUrl}/api/version");
+                var versionInfo = JsonSerializer.Deserialize<VersionInfo>(response);
                 
-                // Check if we should use cached data
-                var now = DateTime.Now;
-                bool useCache = File.Exists(_cacheFilePath) && 
-                               (now - _lastUpdateCheck) < _updateCheckInterval;
-                
-                CacheData cacheData;
-                string serverVersion;
-                
-                if (useCache)
+                if (versionInfo != null && !string.IsNullOrEmpty(versionInfo.Current))
                 {
-                    // Use cached data
-                    UpdateStatusText.Text = "Using cached data...";
-                    cacheData = LoadCachedData();
-                    serverVersion = cacheData.Version;
-                }
-                else
-                {
-                    try
+                    StatusText.Text = $"Ready to install version {versionInfo.Current}";
+                    
+                    // Find the current version entry for notes
+                    var currentVersionEntry = Array.Find(versionInfo.Versions, v => v.Version == versionInfo.Current);
+                    if (currentVersionEntry != null && !string.IsNullOrEmpty(currentVersionEntry.Notes))
                     {
-                        UpdateStatusText.Text = "Connecting to server...";
-                        
-                        // Get files data from server
-                        using (var response = await _httpClient.GetAsync($"{_backendUrl}/api/files"))
+                        // Could display release notes here if UI had a place for it
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = "Unable to connect to server";
+                Debug.WriteLine($"Error loading version info: {ex.Message}");
+            }
+        }
+        
+        private async void InstallButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_installComplete)
+            {
+                if (File.Exists(Path.Combine(_installPath, _appName)))
+                {
+                    Process.Start(Path.Combine(_installPath, _appName));
+                }
+                
+                Application.Current.Shutdown();
+                return;
+            }
+            
+            InstallButton.IsEnabled = false;
+            InstallProgressBar.Visibility = Visibility.Visible;
+            InstallProgressBar.Value = is0;
+            StatusText.Text = "Preparing installation...";
+            
+            try
+            {
+                await Task.Run(async () => 
+                {
+                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 10);
+                    StatusText.Dispatcher.Invoke(() => StatusText.Text = "Creating installation directory...");
+                    
+                    if (!Directory.Exists(_installPath))
+                    {
+                        Directory.CreateDirectory(_installPath);
+                    }
+                    
+                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 20);
+                    StatusText.Dispatcher.Invoke(() => StatusText.Text = "Downloading application files...");
+                    
+                    string tempZipFile = Path.Combine(Path.GetTempPath(), "LeetStoreApp.zip");
+                    
+                    int maxRetries = 3;
+                    int retryCount = 0;
+                    bool downloadSuccess = false;
+                    
+                    while (!downloadSuccess && retryCount < maxRetries)
+                    {
+                        try
                         {
-                            if (!response.IsSuccessStatusCode)
+                            using (var httpClient = new HttpClient())
                             {
-                                throw new Exception($"Server returned {response.StatusCode}");
+                                httpClient.Timeout = TimeSpan.FromMinutes(5); // Longer timeout for download
+                                
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = "Downloading application package...");
+                                
+                                // Stream the download to a file
+                                using (var response = await httpClient.GetAsync(_downloadUrl, HttpCompletionOption.ResponseHeadersRead))
+                                {
+                                    response.EnsureSuccessStatusCode();
+                                    
+                                    long? totalBytes = response.Content.Headers.ContentLength;
+                                    using (var contentStream = await response.Content.ReadAsStreamAsync())
+                                    using (var fileStream = new FileStream(tempZipFile, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+                                    {
+                                        byte[] buffer = new byte[8192];
+                                        long totalBytesRead = 0;
+                                        int bytesRead;
+                                        
+                                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) != 0)
+                                        {
+                                            await fileStream.WriteAsync(buffer, 0, bytesRead);
+                                            totalBytesRead += bytesRead;
+                                            
+                                            if (totalBytes.HasValue)
+                                            {
+                                                double progressPercentage = (double)totalBytesRead / totalBytes.Value * 40 + 20;
+                                                InstallProgressBar.Dispatcher.Invoke(() => 
+                                                    InstallProgressBar.Value = progressPercentage);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            downloadSuccess = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            retryCount++;
+                            
+                            if (retryCount >= maxRetries)
+                            {
+                                StatusText.Dispatcher.Invoke(() => 
+                                    StatusText.Text = "All download attempts failed.");
+                                throw;
                             }
                             
-                            var responseContent = await response.Content.ReadAsStringAsync();
-                            var filesResponse = JsonSerializer.Deserialize<FilesResponse>(responseContent);
+                            // Wait before retry
+                            int waitTime = (int)Math.Pow(2, retryCount);
+                            StatusText.Dispatcher.Invoke(() => 
+                                StatusText.Text = $"Download error. Retrying in {waitTime} seconds...");
+                            await Task.Delay(waitTime * 1000);
+                        }
+                    }
+                    
+                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 60);
+                    StatusText.Dispatcher.Invoke(() => StatusText.Text = "Extracting files...");
+                    
+                    // Ensure the installation directory is empty or backup existing files
+                    if (Directory.Exists(_installPath) && Directory.GetFileSystemEntries(_installPath).Length > 0)
+                    {
+                        string backupDir = Path.Combine(Path.GetTempPath(), "LeetStoreBackup_" + DateTime.Now.Ticks);
+                        Directory.CreateDirectory(backupDir);
+                        
+                        foreach (string item in Directory.GetFileSystemEntries(_installPath))
+                        {
+                            string destPath = Path.Combine(backupDir, Path.GetFileName(item));
                             
-                            cacheData = new CacheData
+                            if (Directory.Exists(item))
                             {
-                                Files = filesResponse.Files,
-                                Version = filesResponse.Version,
-                                LastUpdated = now
-                            };
-                            
-                            // Update cache
-                            SaveCacheData(cacheData);
-                            _lastUpdateCheck = now;
-                            serverVersion = filesResponse.Version;
+                                DirectoryCopy(item, destPath, true);
+                            }
+                            else
+                            {
+                                File.Copy(item, destPath, true);
+                            }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (File.Exists(_cacheFilePath))
-                        {
-                            UpdateStatusText.Text = "Error connecting to server. Using cached data...";
-                            cacheData = LoadCachedData();
-                            serverVersion = cacheData.Version;
-                        }
-                        else
-                        {
-                            throw;
-                        }
-                    }
-                }
-                
-                // Compare versions
-                if (serverVersion != _appVersion)
-                {
-                    UpdateStatusText.Text = $"New version available: {serverVersion}";
-                    UpdateButton.Content = "Update to version " + serverVersion;
-                    UpdateButton.Visibility = Visibility.Visible;
-                    return;
-                }
-                
-                // Process files data to find updates needed
-                _filesToUpdate.Clear();
-                
-                foreach (var fileInfo in cacheData.Files)
-                {
-                    var localFilePath = Path.Combine(_installDir, fileInfo.Name);
-                    var needsUpdate = false;
-                    
-                    if (!File.Exists(localFilePath))
-                    {
-                        needsUpdate = true;
-                    }
-                    else
-                    {
-                        var localHash = CalculateFileHash(localFilePath);
-                        var remoteHash = fileInfo.Hash;
                         
-                        if (localHash != remoteHash)
-                        {
-                            needsUpdate = true;
-                        }
+                        Directory.Delete(_installPath, true);
+                        Directory.CreateDirectory(_installPath);
                     }
                     
-                    if (needsUpdate)
-                    {
-                        _filesToUpdate.Add(fileInfo);
-                    }
-                }
+                    ZipFile.ExtractToDirectory(tempZipFile, _installPath, true);
+                    
+                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 80);
+                    StatusText.Dispatcher.Invoke(() => StatusText.Text = "Creating shortcuts...");
+                    
+                    CreateDesktopShortcut();
+                    CreateStartMenuShortcut();
+                    
+                    File.Delete(tempZipFile);
+                    
+                    InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 100);
+                });
                 
-                if (_filesToUpdate.Count > 0)
-                {
-                    UpdateStatusText.Text = $"Updates available: {_filesToUpdate.Count} files need updating";
-                    UpdateButton.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    UpdateStatusText.Text = "Your application is up to date";
-                    UpdateButton.Visibility = Visibility.Hidden;
-                }
+                StatusText.Text = "Installation completed successfully!";
+                InstallButton.Content = "Launch Application";
+                _installComplete = true;
+                InstallButton.IsEnabled = true;
             }
             catch (Exception ex)
             {
-                UpdateStatusText.Text = $"Error checking for updates: {ex.Message}";
+                StatusText.Text = $"Installation failed: {ex.Message}";
+                MessageBox.Show($"Installation failed: {ex.Message}", "Installation Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                InstallButton.IsEnabled = true;
             }
         }
         
-        private string CalculateFileHash(string filePath)
+        private void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
         {
-            using (var md5 = System.Security.Cryptography.MD5.Create())
-            using (var stream = File.OpenRead(filePath))
+            DirectoryInfo dir = new DirectoryInfo(sourceDirName);
+            DirectoryInfo[] dirs = dir.GetDirectories();
+
+            if (!Directory.Exists(destDirName))
             {
-                byte[] hash = md5.ComputeHash(stream);
-                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                Directory.CreateDirectory(destDirName);
+            }
+
+            FileInfo[] files = dir.GetFiles();
+            foreach (FileInfo file in files)
+            {
+                string tempPath = Path.Combine(destDirName, file.Name);
+                file.CopyTo(tempPath, true);
+            }
+
+            if (copySubDirs)
+            {
+                foreach (DirectoryInfo subdir in dirs)
+                {
+                    string tempPath = Path.Combine(destDirName, subdir.Name);
+                    DirectoryCopy(subdir.FullName, tempPath, copySubDirs);
+                }
             }
         }
         
-        private CacheData LoadCachedData()
+        private void CreateDesktopShortcut()
         {
-            try
-            {
-                string json = File.ReadAllText(_cacheFilePath);
-                var cacheData = JsonSerializer.Deserialize<CacheData>(json);
-                return cacheData ?? new CacheData { Files = new List<FileInfo>(), Version = _appVersion };
-            }
-            catch
-            {
-                return new CacheData { Files = new List<FileInfo>(), Version = _appVersion };
-            }
-        }
-        
-        private void SaveCacheData(CacheData cacheData)
-        {
-            try
-            {
-                string json = JsonSerializer.Serialize(cacheData, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(_cacheFilePath, json);
-            }
-            catch
-            {
-                // Ignore cache save errors
-            }
-        }
-        
-        private async void UpdateButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_isUpdating)
-                return;
-                
-            _isUpdating = true;
-            UpdateButton.IsEnabled = false;
-            UpdateProgressBar.Visibility = Visibility.Visible;
-            UpdateProgressBar.Value = 0;
+            string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string shortcutPath = Path.Combine(desktopPath, "LeetStore.lnk");
             
-            try
+            IWshRuntimeLibrary.WshShell shell = new IWshRuntimeLibrary.WshShell();
+            IWshRuntimeLibrary.IWshShortcut shortcut = (IWshRuntimeLibrary.IWshShortcut)shell.CreateShortcut(shortcutPath);
+            
+            shortcut.TargetPath = Path.Combine(_installPath, _appName);
+            shortcut.WorkingDirectory = _installPath;
+            shortcut.Description = "LeetStore Application";
+            shortcut.IconLocation = Path.Combine(_installPath, _appName);
+            shortcut.Save();
+        }
+        
+        private void CreateStartMenuShortcut()
+        {
+            string startMenuPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "LeetStore");
+            
+            if (!Directory.Exists(startMenuPath))
             {
-                int totalFiles = _filesToUpdate.Count;
-                int processedFiles = 0;
-                
-                foreach (var fileInfo in _filesToUpdate)
-                {
-                    UpdateStatusText.Text = $"Updating {fileInfo.Name}...";
-                    
-                    try
-                    {
-                        // Download the file
-                        string fileUrl = _backendUrl + fileInfo.Url;
-                        byte[] fileContent = await _httpClient.GetByteArrayAsync(fileUrl);
-                        
-                        var localFilePath = Path.Combine(_installDir, fileInfo.Name);
-                        
-                        // Create directory if it doesn't exist
-                        var directory = Path.GetDirectoryName(localFilePath);
-                        if (!Directory.Exists(directory))
-                        {
-                            Directory.CreateDirectory(directory);
-                        }
-                        
-                        // Backup the existing file if it exists
-                        if (File.Exists(localFilePath))
-                        {
-                            string backupPath = localFilePath + ".bak";
-                            if (File.Exists(backupPath))
-                                File.Delete(backupPath);
-                                
-                            File.Copy(localFilePath, backupPath);
-                        }
-                        
-                        // Write the new file
-                        File.WriteAllBytes(localFilePath, fileContent);
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new Exception($"Failed to update {fileInfo.Name}: {ex.Message}");
-                    }
-                    
-                    processedFiles++;
-                    UpdateProgressBar.Value = (double)processedFiles / totalFiles * 100;
-                }
-                
-                UpdateStatusText.Text = "Update completed successfully";
-                
-                var animation = new ColorAnimation
-                {
-                    To = Colors.LightGreen,
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-                
-                var brush = new SolidColorBrush(Colors.LightGray);
-                UpdateStatusText.Foreground = brush;
-                brush.BeginAnimation(SolidColorBrush.ColorProperty, animation);
-                
-                _filesToUpdate.Clear();
-                UpdateButton.Visibility = Visibility.Hidden;
-                
-                // Force refresh the cache after a successful update
-                try
-                {
-                    if (File.Exists(_cacheFilePath))
-                        File.Delete(_cacheFilePath);
-                }
-                catch { }
-                
-                await Task.Delay(2000);
-                
-                MessageBoxResult result = MessageBox.Show("Application has been updated successfully. Would you like to restart now?", "Update Complete", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                
-                if (result == MessageBoxResult.Yes)
-                {
-                    RestartApplication();
-                }
-            }
-            catch (Exception ex)
-            {
-                UpdateStatusText.Text = $"Error updating files: {ex.Message}";
-                MessageBox.Show($"Error updating application: {ex.Message}", "Update Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Directory.CreateDirectory(startMenuPath);
             }
             
-            _isUpdating = false;
-            UpdateButton.IsEnabled = true;
-        }
-        
-        private void RestartApplication()
-        {
-            string appPath = Assembly.GetExecutingAssembly().Location;
-            Process.Start(appPath);
-            Application.Current.Shutdown();
+            string shortcutPath = Path.Combine(startMenuPath, "LeetStore.lnk");
+            
+            IWshRuntimeLibrary.WshShell shell = new IWshRuntimeLibrary.WshShell();
+            IWshRuntimeLibrary.IWshShortcut shortcut = (IWshRuntimeLibrary.IWshShortcut)shell.CreateShortcut(shortcutPath);
+            
+            shortcut.TargetPath = Path.Combine(_installPath, _appName);
+            shortcut.WorkingDirectory = _installPath;
+            shortcut.Description = "LeetStore Application";
+            shortcut.IconLocation = Path.Combine(_installPath, _appName);
+            shortcut.Save();
         }
 
         private void CloseButton_Click(object sender, RoutedEventArgs e)
@@ -408,9 +389,9 @@ namespace LeetStoreApp
             this.WindowState = WindowState.Minimized;
         }
         
-        private void Window_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        private void Window_MouseDown(object sender, MouseButtonEventArgs e)
         {
-            if (e.ChangedButton == System.Windows.Input.MouseButton.Left)
+            if (e.ChangedButton == MouseButton.Left)
                 this.DragMove();
         }
     }
