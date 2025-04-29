@@ -21,8 +21,8 @@ namespace LeetStoreInstaller
     public partial class InstallerWindow : Window
     {
         private readonly string _installPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LeetStore");
-        private readonly string _appName = "LeetStoreApp.exe";
-        private readonly string _backendUrl = "http://localhost:3000"; // Replace with your actual backend URL
+        private readonly string _appName = "leet.exe";
+        private readonly string _backendUrl = "https://s.enoughdrama.me";
         private readonly string _downloadUrl;
         private bool _installComplete = false;
         private HttpClient _httpClient;
