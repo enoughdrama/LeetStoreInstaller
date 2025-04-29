@@ -21,7 +21,7 @@ namespace LeetStoreInstaller
     {
         private readonly string _installPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LeetStore");
         private readonly string _appName = "LeetStoreApp.exe";
-        private readonly string _backendUrl = "http://localhost:3000"; // Replace with your actual backend URL
+        private readonly string _backendUrl = "https://s.enoughdrama.me";
         private readonly string _downloadUrl;
         private bool _installComplete = false;
         private HttpClient _httpClient;
@@ -127,11 +127,9 @@ namespace LeetStoreInstaller
                 {
                     StatusText.Text = $"Ready to install version {versionInfo.Current}";
                     
-                    // Find the current version entry for notes
                     var currentVersionEntry = Array.Find(versionInfo.Versions, v => v.Version == versionInfo.Current);
                     if (currentVersionEntry != null && !string.IsNullOrEmpty(currentVersionEntry.Notes))
                     {
-                        // Could display release notes here if UI had a place for it
                     }
                 }
             }
@@ -187,12 +185,11 @@ namespace LeetStoreInstaller
                         {
                             using (var httpClient = new HttpClient())
                             {
-                                httpClient.Timeout = TimeSpan.FromMinutes(5); // Longer timeout for download
+                                httpClient.Timeout = TimeSpan.FromMinutes(5);
                                 
                                 StatusText.Dispatcher.Invoke(() => 
                                     StatusText.Text = "Downloading application package...");
                                 
-                                // Stream the download to a file
                                 using (var response = await httpClient.GetAsync(_downloadUrl, HttpCompletionOption.ResponseHeadersRead))
                                 {
                                     response.EnsureSuccessStatusCode();
@@ -244,7 +241,6 @@ namespace LeetStoreInstaller
                     InstallProgressBar.Dispatcher.Invoke(() => InstallProgressBar.Value = 60);
                     StatusText.Dispatcher.Invoke(() => StatusText.Text = "Extracting files...");
                     
-                    // Ensure the installation directory is empty or backup existing files
                     if (Directory.Exists(_installPath) && Directory.GetFileSystemEntries(_installPath).Length > 0)
                     {
                         string backupDir = Path.Combine(Path.GetTempPath(), "LeetStoreBackup_" + DateTime.Now.Ticks);
